@@ -11,41 +11,6 @@ from model.seed_init import place_seed_points
 from model.prototypical_contrast import PrototypeContrastLoss
 import numpy as np
 
-class ChannelAttention(nn.Module):
-    def __init__(self, in_planes, ratio=16):
-        super(ChannelAttention, self).__init__()
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)
-        self.max_pool = nn.AdaptiveMaxPool2d(1)
-
-        self.fc1 = nn.Conv2d(in_planes, in_planes // ratio, 1, bias=False)
-        self.relu1 = nn.ReLU()
-        self.fc2 = nn.Conv2d(in_planes // ratio, in_planes, 1, bias=False)
-        self.sigmoid = nn.Sigmoid()
-
-    def forward(self, x):
-        avg_out = self.fc2(self.relu1(self.fc1(self.avg_pool(x))))
-        max_out = self.fc2(self.relu1(self.fc1(self.max_pool(x))))
-        out = avg_out + max_out
-        return self.sigmoid(out)
-
-
-class SpatialAttention(nn.Module):
-    def __init__(self, kernel_size=7):
-        super(SpatialAttention, self).__init__()
-
-        assert kernel_size in (3, 7), 'kernel size must be 3 or 7'
-        padding = 3 if kernel_size == 7 else 1
-
-        self.conv1 = nn.Conv2d(2, 1, kernel_size, padding=padding, bias=False)  # 7,3     3,1
-        self.sigmoid = nn.Sigmoid()
-
-    def forward(self, x):
-        avg_out = torch.mean(x, dim=1, keepdim=True)
-        max_out, _ = torch.max(x, dim=1, keepdim=True)
-        x = torch.cat([avg_out, max_out], dim=1)
-        x = self.conv1(x)
-        return self.sigmoid(x)
-
 def Weighted_GAP(supp_feat, mask):
     supp_feat = supp_feat * mask
     feat_h, feat_w = supp_feat.shape[-2:][0], supp_feat.shape[-2:][1]
@@ -63,15 +28,6 @@ def get_gram_matrix(fea):
     return gram
 
 class Attention(nn.Module):
-    """
-    Guided Attention Module (GAM).
-
-    Args:
-        in_channels: interval channel depth for both input and output
-            feature map.
-        drop_rate: dropout rate.
-    """
-
     def __init__(self, in_channels, drop_rate=0.1):
         super().__init__()
         self.DEPTH = in_channels
@@ -85,7 +41,6 @@ class Attention(nn.Module):
             nn.Dropout(p=drop_rate),
             nn.Sigmoid())
 
-    @staticmethod
     def mask(embedding, mask):
         h, w = embedding.size()[-2:]
 
@@ -104,17 +59,17 @@ class Attention(nn.Module):
         Fs = g * Fs
         return Fs
 
-class SSP_MatchingNet(nn.Module):
+class MatchingNet(nn.Module):
     def __init__(self, backbone_name, shot):
-        super(SSP_MatchingNet, self).__init__()
-
+        super(MatchingNet, self).__init__()
+        
         self.backbone = resnet.__dict__[backbone_name](pretrained=True)
 
         self.layer0 = nn.Sequential(self.backbone.conv1, self.backbone.bn1, self.backbone.relu, self.backbone.maxpool)
         self.layer1, self.layer2, self.layer3 = self.backbone.layer1, self.backbone.layer2, self.backbone.layer3
 
         self.contrast_loss = PrototypeContrastLoss()
-        self.shot = 5
+        self.shot = shot
 
         k_size = 9
         self.avg_pool = nn.AdaptiveAvgPool2d(1)
@@ -124,20 +79,12 @@ class SSP_MatchingNet(nn.Module):
         self.gam = Attention(in_channels=1024)
 
     def forward(self, img_s_list, mask_s_list, img_q, mask_q):
-        #img_s_list = torch.cat(img_s_list, dim=0).squeeze(1).unsqueeze(0)
-        #mask_s_list = torch.cat(mask_s_list, dim=0).squeeze(1).unsqueeze(0)
-        #print(img_s_list.shape)
-        img_s_list = img_s_list.permute(1, 0, 2, 3, 4)
-        mask_s_list = mask_s_list.permute(1, 0, 2, 3)
-
-
         # feature maps of support images and query image
         feature_s_list = []
         supp_feat_list = []
-        for k in range(len(img_s_list)):
+        for k in range(self.shot):
             with torch.no_grad():
                 x = self.layer2(self.layer1(self.layer0(img_s_list[k])))
-                #supp_feat_list.append(x)
             s = self.layer3(x)
             s = self.ECA(s)
             feature_s_list.append(s)
@@ -153,7 +100,6 @@ class SSP_MatchingNet(nn.Module):
             norm_max = torch.ones_like(que_gram).norm(dim=(1, 2))
             est_val_list = []
             for supp_item in feature_s_list:
-                #supp_item = feature_s_list[k]
                 supp_gram = get_gram_matrix(supp_item)
                 gram_diff = que_gram - supp_gram
                 est_val_list.append((gram_diff.norm(dim=(1, 2)) / norm_max).reshape(bs, 1, 1, 1))  # norm2
@@ -162,7 +108,7 @@ class SSP_MatchingNet(nn.Module):
             est_list_final = []
             for bs_ in range(bs):
                 est_list = []
-                for k in range(len(img_s_list)):
+                for k in range(self.shot):
                     est = (1 / (est_val_total[bs_, k] / est_mean[bs_] + 1e-5)) / 5
                     est_list.append(torch.tensor([est]).unsqueeze(0))
                 est_list_final.append(torch.cat(est_list, dim=1))
@@ -230,13 +176,6 @@ class SSP_MatchingNet(nn.Module):
 
         FP_2 = FP_cross * 0.2 + SSFP_1 * 0.3 + SSFP_2 * 0.5
         BP_2 = BP_1 * 0.4 + BP_2 * 0.6
-
-        #FP_2 = FP_0.cuda() * 0.5 + SSFP_2.cuda() * 0.5
-        #BP_2 = SSBP_2 * 0.3 + ASBP_2 * 0.7
-
-        #FP_2 = FP_0.cuda() * 0.3 + FP_1.cuda() * 0.3 + FP_2.cuda() * 0.4
-        #BP_2 = BP_1 * 0.4 + BP_2 * 0.6
-
 
         out_2 = self.similarity_func(feature_q.cuda(), FP_2.cuda(), BP_2.cuda())
 
@@ -580,19 +519,6 @@ class SSP_MatchingNet(nn.Module):
     def train_mode(self):
         self.train()
         self.backbone.eval()
-
-    def SE(self, x):
-        b, c, _, _ = x.size()
-        y = self.avg_pool(x).view(b, c)
-        y = self.fc(y).view(b, c, 1, 1)
-        return x * y.expand_as(x)
-
-    def CBAM(self, x):
-        out = x * self.sa(x)
-        result = out * self.ca(out)
-        #out = x * self.ca(x)
-        #result = out * self.sa(out)
-        return result
 
 
 
