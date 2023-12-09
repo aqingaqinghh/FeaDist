@@ -191,7 +191,7 @@ class MatchingNet(nn.Module):
         out_1 = F.interpolate(out_1, size=(h, w), mode="bilinear", align_corners=True)
 
         out_2 = F.interpolate(out_2, size=(h, w), mode="bilinear", align_corners=True)
-        #print(out_2.shape)
+
         out_ls = [out_2, out_1]
 
         if self.training:
@@ -201,9 +201,8 @@ class MatchingNet(nn.Module):
             #[16,1024]
             neg_sample_1 = self.masked_average_pooling(feature_q,
                                                                (mask_q == 0).float())
-            neg_sample_2 = neg_sample_1
             
-            prototype_contrast_loss = self.contrast_loss(base_sample, support_prototype, cross_prototype, cross_p, neg_sample_1, neg_sample_2)
+            prototype_contrast_loss = self.contrast_loss(base_sample, support_prototype, cross_p, neg_sample_1)
             out_ls.append(prototype_contrast_loss)
         return out_ls
 
